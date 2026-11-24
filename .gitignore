@@ -1,0 +1,41 @@
+# ---- Keil 构建产物 ----
+MDK-ARM/F407ZG/
+MDK-ARM/Objects/
+MDK-ARM/Listings/
+MDK-ARM/RTE/
+MDK-ARM/DebugConfig/
+*.o
+*.d
+*.crf
+*.axf
+*.hex
+*.bin
+*.lst
+*.dep
+*.lnp
+*.map
+*.htm
+*.sbr
+*.iex
+*.tra
+
+# ---- 调试期留下的构建日志 ----
+MDK-ARM/_build_*.log
+_build_*.log
+
+# ---- 备份与个人 IDE 设置 ----
+*.bak
+*.bak-*
+*.bak_*
+*.uvguix.*
+*.uvoptx
+*.uvprojx.bak*
+
+# ---- Python ----
+__pycache__/
+*.pyc
+
+# ---- 系统垃圾 ----
+Thumbs.db
+desktop.ini
+.DS_Store
