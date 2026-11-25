@@ -139,9 +139,12 @@ def main() -> int:
     ap.add_argument("--pid", default=None)
     args = ap.parse_args()
 
+    # ★ 原来写死了作者机器上的日志目录。现在默认落在仓库边的 logs/ 下
+    log_dir = os.environ.get(
+        "CAN_GW_LOG_DIR",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "logs"))
     log_path = args.log or os.path.join(
-        r"C:\Users\acnkx\Desktop\stm32\杂项文件\证据日志",
-        "soak72_%s.log" % time.strftime("%Y%m%d_%H%M"))
+        log_dir, "soak72_%s.log" % time.strftime("%Y%m%d_%H%M"))
     pid_path = args.pid or (os.path.splitext(log_path)[0] + ".pid")
 
     logf = open(log_path, "a", encoding="utf-8", buffering=1)

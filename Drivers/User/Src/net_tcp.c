@@ -258,7 +258,7 @@ static uint16_t Fwd_Exec(const char *s, uint16_t n, uint8_t *out)
         int m = snprintf((char *)out, (size_t)FWD_TX_MAX,
                          "Q rf=%lu tx=%lu ok=%lu drop=%lu bad=%lu ack=%lu "
                          "ff=%lu cf=%lu fc=%lu to=%lu wms=%lu wmax=%lu "
-                         "cfd=%lu\r\n",
+                         "cfd=%lu c2=%lu c2rx=%lu c2tx=%lu c2rt=%lu txd=%lu\r\n",
                          (unsigned long)g_can_rx_frames,
                          (unsigned long)g_can_tx_frames,
                          (unsigned long)g_fwd_can_ok,
@@ -271,7 +271,12 @@ static uint16_t Fwd_Exec(const char *s, uint16_t n, uint8_t *out)
                          (unsigned long)g_fwd_isotp_fc_to,
                          (unsigned long)g_fwd_isotp_wait_ms,
                          (unsigned long)g_fwd_isotp_wait_max,
-                         (unsigned long)g_fwd_isotp_cf_dropped);
+                         (unsigned long)g_fwd_isotp_cf_dropped,
+                         (unsigned long)g_can2_self_test,
+                         (unsigned long)g_can2_rx_frames,
+                         (unsigned long)g_can2_tx_frames,
+                         (unsigned long)g_gw_route_hit,
+                         (unsigned long)g_gw_txq_drop);
         if (m <= 0)
         {
             return 0u;

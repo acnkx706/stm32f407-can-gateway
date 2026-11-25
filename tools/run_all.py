@@ -41,7 +41,10 @@ PY = sys.executable
 HOST = "192.168.10.50"
 HTTP = f"http://{HOST}/data"
 SERIAL_PORT = "COM11"          # F103 的调试串口，换 USB 口时要改
-TOOL = r"C:\Users\acnkx\Desktop\stm32\杂项文件\PC工具\flash_app.py"
+# ★ 同上：去掉写死的家目录。环境变量优先，兜底按仓库相对位置找烧录工具
+TOOL = os.environ.get(
+    "CAN_GW_FLASH_TOOL",
+    os.path.join(HERE, "..", "..", "..", "杂项文件", "PC工具", "flash_app.py"))
 
 
 # ---------------------------------------------------------------- 小工具

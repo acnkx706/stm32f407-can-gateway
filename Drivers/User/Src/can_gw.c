@@ -30,6 +30,9 @@
  * · 六个计数在头文件里 extern 出去，主循环直接读，不需要加锁
  */
 CAN_HandleTypeDef hcan1;
+CAN_HandleTypeDef hcan2;
+                     
+/* 2026-11-24 加：第二路总线（PB12/PB13），双通道网关的物理出口 */
 
 volatile uint32_t g_can_tx_frames  = 0u;
 volatile uint32_t g_can_rx_frames  = 0u;
@@ -75,6 +78,9 @@ volatile uint32_t g_fwd_isotp_wait_max = 0u;
 volatile uint32_t g_fwd_isotp_cf_dropped = 0u;   /* 2026-11-24：被丢弃的连续帧数 */
 
 volatile uint8_t g_can_init_step = 0u;
+/* 2026-11-24 加：CAN2 回环自检结果，0xFF = 还没跑过，0 = 通过，其余为出错步骤号
+ * · 放进 TCP 的 Q 里输出，因为 F407 的串口接哪个口不确定，网络通道是确定通的 */
+volatile uint8_t g_can2_self_test = 0xFFu;
 
 /* ★ 时钟、引脚、中断优先级
  * · HAL_CAN_Init 内部会调用这个弱函数，在这里配 GPIOB 和 NVIC
@@ -84,6 +90,33 @@ volatile uint8_t g_can_init_step = 0u;
 void HAL_CAN_MspInit(CAN_HandleTypeDef *hcan)
 {
     GPIO_InitTypeDef gpio = {0};
+
+    /* 2026-11-24 加：CAN2 的时钟、引脚、中断
+     * 做了什么：PB12 = CAN2_RX、PB13 = CAN2_TX，AF9 复用；开三个中断入口
+     * 为什么先开 CAN1 的时钟：CAN2 没有自己的滤波器寄存器，
+     *   同一套 28 组滤波器挂在 CAN1 上，CAN1 不供电 CAN2 的滤波器配不了
+     * 为什么不用 PB5/PB6：那两个脚被 W5500 的 SPI 占着
+     * 怎么验证：回环自检 CanGw_SelfTest2() 返回 0
+     */
+    if (hcan->Instance == CAN2)
+    {
+	__HAL_RCC_CAN1_CLK_ENABLE();
+	__HAL_RCC_CAN2_CLK_ENABLE();
+	__HAL_RCC_GPIOB_CLK_ENABLE();
+	gpio.Pin       = GPIO_PIN_12 | GPIO_PIN_13;
+	gpio.Mode      = GPIO_MODE_AF_PP;
+	gpio.Pull      = GPIO_PULLUP;
+	gpio.Speed     = GPIO_SPEED_FREQ_VERY_HIGH;
+	gpio.Alternate = GPIO_AF9_CAN2;
+	HAL_GPIO_Init(GPIOB, &gpio);
+	HAL_NVIC_SetPriority(CAN2_TX_IRQn,  5u, 0u);
+	HAL_NVIC_EnableIRQ  (CAN2_TX_IRQn);
+	HAL_NVIC_SetPriority(CAN2_RX0_IRQn, 5u, 0u);
+	HAL_NVIC_EnableIRQ  (CAN2_RX0_IRQn);
+	HAL_NVIC_SetPriority(CAN2_SCE_IRQn, 5u, 0u);
+	HAL_NVIC_EnableIRQ  (CAN2_SCE_IRQn);
+	return;
+    }
 
     if (hcan->Instance != CAN1)
     {
@@ -181,6 +214,120 @@ HAL_StatusTypeDef CanGw_Init(uint8_t loopback)
     }
 
     return HAL_OK;
+}
+
+/* ★ CAN2 初始化（2026-11-24 加，第二路总线）
+ * 做了什么：按和 CAN1 一样的时序把 CAN2 配成 500 kbps，用滤波器组 14 收全部 ID
+ * 为什么时序一模一样：两路都在 APB1 = 42 MHz，预分频 4 得 10.5 MHz，
+ *   1 + 16 + 4 = 21 tq，42 MHz / 4 / 21 = 500 kbps
+ * 为什么组号从 14 起：CAN1 占 0~13，CAN2 占 14~27，这是 bxCAN 的硬规定
+ * 怎么验证：CanGw_Init2(1) 之后调 CanGw_SelfTest2()，返回 0 为通过
+ */
+HAL_StatusTypeDef CanGw_Init2(uint8_t loopback)
+{
+	CAN_FilterTypeDef filter = {0};
+
+	hcan2.Instance                  = CAN2;
+	hcan2.Init.Prescaler            = 4u;
+	hcan2.Init.Mode                 = (loopback != 0u) ? CAN_MODE_LOOPBACK : CAN_MODE_NORMAL;
+	hcan2.Init.SyncJumpWidth        = CAN_SJW_1TQ;
+	hcan2.Init.TimeSeg1             = CAN_BS1_16TQ;
+	hcan2.Init.TimeSeg2             = CAN_BS2_4TQ;
+	hcan2.Init.TimeTriggeredMode    = DISABLE;
+	hcan2.Init.AutoBusOff           = ENABLE;
+	hcan2.Init.AutoWakeUp           = DISABLE;
+	hcan2.Init.AutoRetransmission   = ENABLE;
+	hcan2.Init.ReceiveFifoLocked    = DISABLE;
+	hcan2.Init.TransmitFifoPriority = DISABLE;
+
+	if (HAL_CAN_Init(&hcan2) != HAL_OK)
+	{
+		return HAL_ERROR;
+	}
+
+	/* 组 14 起是 CAN2 的地盘；掩码全 0 表示什么 ID 都收 */
+	filter.FilterBank           = 14u;
+	filter.FilterMode           = CAN_FILTERMODE_IDMASK;
+	filter.FilterScale          = CAN_FILTERSCALE_32BIT;
+	filter.FilterIdHigh         = 0x0000u;
+	filter.FilterIdLow          = 0x0000u;
+	filter.FilterMaskIdHigh     = 0x0000u;
+	filter.FilterMaskIdLow      = 0x0000u;
+	filter.FilterFIFOAssignment = CAN_RX_FIFO0;
+	filter.FilterActivation     = ENABLE;
+	filter.SlaveStartFilterBank = 14u;
+
+	if (HAL_CAN_ConfigFilter(&hcan2, &filter) != HAL_OK)
+	{
+		return HAL_ERROR;
+	}
+
+	if (HAL_CAN_Start(&hcan2) != HAL_OK)
+	{
+		return HAL_ERROR;
+	}
+
+	/* 回环模式下不挂接收中断：自检自己轮询收帧，
+	 * 挂了中断会被回调抢走，自检永远等不到 */
+	if (loopback != 0u)
+	{
+		return HAL_OK;
+	}
+
+	if (HAL_CAN_ActivateNotification(&hcan2,
+				CAN_IT_RX_FIFO0_MSG_PENDING
+				| CAN_IT_ERROR
+				| CAN_IT_ERROR_PASSIVE
+				| CAN_IT_BUSOFF
+				| CAN_IT_LAST_ERROR_CODE) != HAL_OK)
+	{
+		return HAL_ERROR;
+	}
+
+	return HAL_OK;
+}
+
+/* ★ CAN2 回环自检（2026-11-24 加）
+ * 做了什么：发一帧 0x2E0 再从 FIFO0 收回来，比对 ID
+ * 为什么需要它：收发器到货前、总线还断着的时候，先用它证明
+ *   CAN2 外设和 PB12/PB13 是好的，把"硬件没到"和"代码写错"分开
+ * 内部回环模式控制器自己应答自己，不依赖任何外部硬件
+ * 怎么验证：返回 0 就是通过；1 装邮箱失败 / 2 取帧失败 / 3 ID 不符 / 4 超时
+ */
+uint8_t CanGw_SelfTest2(void)
+{
+	CAN_TxHeaderTypeDef tx = {0};
+	CAN_RxHeaderTypeDef rx = {0};
+	uint8_t  data[8] = {0xA5u, 0x5Au, 0x01u, 0x02u, 0x03u, 0x04u, 0x05u, 0x06u};
+	uint8_t  got[8]  = {0};
+	uint32_t mailbox = 0u;
+	uint32_t t;
+
+	tx.StdId              = 0x2E0u;
+	tx.ExtId              = 0u;
+	tx.IDE                = CAN_ID_STD;
+	tx.RTR                = CAN_RTR_DATA;
+	tx.DLC                = 8u;
+	tx.TransmitGlobalTime = DISABLE;
+
+	if (HAL_CAN_AddTxMessage(&hcan2, &tx, data, &mailbox) != HAL_OK)
+	{
+		return 1u;
+	}
+
+	for (t = 0u; t < 200000u; t++)
+	{
+		if (HAL_CAN_GetRxFifoFillLevel(&hcan2, CAN_RX_FIFO0) > 0u)
+		{
+			if (HAL_CAN_GetRxMessage(&hcan2, CAN_RX_FIFO0, &rx, got) != HAL_OK)
+			{
+				return 2u;
+			}
+			return (rx.StdId == 0x2E0u) ? 0u : 3u;
+		}
+	}
+
+	return 4u;
 }
 
 /* ★ 发一帧标准数据帧
@@ -562,6 +709,215 @@ const CanGwAlarm_t *CanGw_GetAlarm(void)
     return &s_alarm;
 }
 
+/*==============================================================================
+ *  ★ 路由表与跨通道转发（2026-11-24 加，双通道网关的核心）
+ *
+ *  ★ 做了什么
+ *    中断里只把收到的帧塞进一个小队列，主循环再按路由表决定往哪条通道转。
+ *    中断里不直接发帧：装邮箱可能失败，也不该在中断里做路由决策。
+ *
+ *  ★ 为什么表只配单向
+ *    只配 CAN1 到 CAN2。两个方向都配的话，CAN2 收到的帧又会被转回 CAN1，
+ *    形成回环风暴。要双向必须加来源标记或 TTL，那是下一步的事。
+ *
+ *  ★ 影响什么
+ *    CAN2 现在还在回环模式，转发出去的帧会被它自己收回，
+ *    正好用 CAN2 的接收计数来自证"路由链路通了"。
+ *
+ *  ★ 怎么验证
+ *    TCP 敲 Q：c2tx 和 c2rx 应该同步增长，且约等于 CAN1 收到的遥测帧数。
+ *============================================================================*/
+
+typedef struct {
+	uint16_t id;
+	uint8_t  ch;
+	uint8_t  dlc;
+	uint8_t  data[8];
+} GwRxItem_t;
+
+typedef struct {
+	uint8_t  src_ch;
+	uint16_t src_id;
+	uint8_t  dst_ch;
+	uint16_t dst_id;
+} GwRoute_t;
+
+#define GW_RXQ_LEN   16u
+
+/* 四条路由：F103 的四类遥测帧从 CAN1 转到 CAN2 */
+static const GwRoute_t s_routes[] = {
+	{ 0u, 0x101u, 1u, 0x101u },
+	{ 0u, 0x102u, 1u, 0x102u },
+	{ 0u, 0x103u, 1u, 0x103u },
+	{ 0u, 0x104u, 1u, 0x104u }
+};
+#define GW_ROUTE_CNT  (sizeof(s_routes) / sizeof(s_routes[0]))
+
+static volatile GwRxItem_t s_rxq[GW_RXQ_LEN];
+static volatile uint8_t    s_rxq_head = 0u;    /* 中断写 */
+static volatile uint8_t    s_rxq_tail = 0u;    /* 主循环读 */
+static volatile uint8_t    s_rxq_ovf  = 0u;
+
+volatile uint32_t g_can2_rx_frames = 0u;
+volatile uint32_t g_can2_tx_frames = 0u;
+volatile uint32_t g_gw_route_hit   = 0u;
+volatile uint32_t g_gw_route_miss  = 0u;
+
+/* ★ 中断里入队：队列满就丢并记一次溢出
+ * · 单生产者单消费者，只有头和尾两个下标，不需要临界区
+ * · 丢一帧远好于在中断里等主循环腾位置 */
+static void Gw_RxPush(uint8_t ch, uint16_t id, const uint8_t *data, uint8_t dlc)
+{
+	uint8_t next = (uint8_t)((s_rxq_head + 1u) % GW_RXQ_LEN);
+	uint8_t i;
+
+	if (next == s_rxq_tail)
+	{
+		s_rxq_ovf++;
+		return;
+	}
+	if (dlc > 8u) { dlc = 8u; }
+
+	s_rxq[s_rxq_head].id  = id;
+	s_rxq[s_rxq_head].ch  = ch;
+	s_rxq[s_rxq_head].dlc = dlc;
+	for (i = 0u; i < dlc; i++) { s_rxq[s_rxq_head].data[i] = data[i]; }
+
+	s_rxq_head = next;
+}
+
+/* ★ 在指定通道上发一帧（ch：0 = CAN1，1 = CAN2）
+ * · 返回 HAL_OK 只代表装进邮箱，不代表总线上已经发完 */
+HAL_StatusTypeDef CanGw_SendStdCh(uint8_t ch, uint16_t std_id, const uint8_t *data, uint8_t len)
+{
+	CAN_TxHeaderTypeDef header = {0};
+	CAN_HandleTypeDef  *h = (ch != 0u) ? &hcan2 : &hcan1;
+	uint8_t  buf[8] = {0};
+	uint32_t mailbox = 0u;
+
+	if (len > 8u) { return HAL_ERROR; }
+	if ((data == NULL) && (len > 0u)) { return HAL_ERROR; }
+	if (len > 0u) { memcpy(buf, data, (size_t)len); }
+
+	header.StdId              = (uint32_t)std_id & 0x7FFu;
+	header.ExtId              = 0u;
+	header.IDE                = CAN_ID_STD;
+	header.RTR                = CAN_RTR_DATA;
+	header.DLC                = len;
+	header.TransmitGlobalTime = DISABLE;
+
+	if (HAL_CAN_AddTxMessage(h, &header, buf, &mailbox) != HAL_OK)
+	{
+		return HAL_ERROR;
+	}
+	if (ch != 0u) { g_can2_tx_frames++; }
+	return HAL_OK;
+}
+
+/* ★ TX 后备队列（2026-11-24 加）
+ * 做了什么：转发时如果目标通道邮箱已满，帧先进这里，下一轮再发
+ * 为什么不能就地重试：在同步路径里 HAL_Delay 重试，正是把主循环拖到 334 ms 的做法
+ * 为什么 8 格：最坏是两路各 4 帧一串，8 格够两轮；真满了才丢并计数
+ * 怎么验证：Q 里 c2rt 与 c2tx 的增量应当相等，txd 保持 0
+ */
+typedef struct {
+	uint16_t id;
+	uint8_t  ch;
+	uint8_t  dlc;
+	uint8_t  data[8];
+} GwTxItem_t;
+
+#define GW_TXQ_LEN   8u
+
+static GwTxItem_t s_txq[GW_TXQ_LEN];
+static uint8_t     s_txq_head = 0u;
+static uint8_t     s_txq_tail = 0u;
+volatile uint32_t  g_gw_txq_drop = 0u;
+
+static void Gw_TxPush(uint8_t ch, uint16_t id, const uint8_t *data, uint8_t dlc)
+{
+	uint8_t next = (uint8_t)((s_txq_head + 1u) % GW_TXQ_LEN);
+	uint8_t i;
+
+	if (next == s_txq_tail)
+	{
+		g_gw_txq_drop++;
+		return;
+	}
+	if (dlc > 8u) { dlc = 8u; }
+
+	s_txq[s_txq_head].ch  = ch;
+	s_txq[s_txq_head].id  = id;
+	s_txq[s_txq_head].dlc = dlc;
+	for (i = 0u; i < dlc; i++) { s_txq[s_txq_head].data[i] = data[i]; }
+
+	s_txq_head = next;
+}
+
+/* ★ 每轮先清后备队列：发成功才出队，失败就停
+ * · 失败说明邮箱还满着，继续试只是空转，留给下一轮（2 ms 后）
+ * · 每次最多清一整圈，防止挤占主循环 */
+void CanGw_TxFlush(void)
+{
+	uint8_t n = 0u;
+
+	while ((s_txq_tail != s_txq_head) && (n < GW_TXQ_LEN))
+	{
+		uint8_t  ch  = s_txq[s_txq_tail].ch;
+		uint16_t id  = s_txq[s_txq_tail].id;
+		uint8_t  dlc = s_txq[s_txq_tail].dlc;
+		uint8_t  buf[8] = {0};
+		uint8_t  i;
+
+		for (i = 0u; i < dlc; i++) { buf[i] = s_txq[s_txq_tail].data[i]; }
+
+		if (CanGw_SendStdCh(ch, id, buf, dlc) != HAL_OK)
+		{
+			break;
+		}
+		s_txq_tail = (uint8_t)((s_txq_tail + 1u) % GW_TXQ_LEN);
+		n++;
+	}
+}
+
+/* ★ 主循环里排空队列并按表转发
+ * · 没命中路由表的帧只计数（g_gw_route_miss），以后要查"漏了什么"就看它
+ * · 一轮最多处理一整圈，防止某条通道灌得太快把主循环钉死 */
+void CanGw_RouteDrain(void)
+{
+	uint8_t n = 0u;
+
+	while ((s_rxq_tail != s_rxq_head) && (n < GW_RXQ_LEN))
+	{
+		uint16_t id  = s_rxq[s_rxq_tail].id;
+		uint8_t  ch  = s_rxq[s_rxq_tail].ch;
+		uint8_t  dlc = s_rxq[s_rxq_tail].dlc;
+		uint8_t  buf[8] = {0};
+		uint8_t  i;
+		uint8_t  hit = 0u;
+
+		for (i = 0u; i < dlc; i++) { buf[i] = s_rxq[s_rxq_tail].data[i]; }
+
+		for (i = 0u; i < (uint8_t)GW_ROUTE_CNT; i++)
+		{
+			if ((s_routes[i].src_ch == ch) && (s_routes[i].src_id == id))
+			{
+				if (CanGw_SendStdCh(s_routes[i].dst_ch, s_routes[i].dst_id, buf, dlc) != HAL_OK)
+				{
+					Gw_TxPush(s_routes[i].dst_ch, s_routes[i].dst_id, buf, dlc);
+				}
+				g_gw_route_hit++;
+				hit = 1u;
+				break;
+			}
+		}
+		if (hit == 0u) { g_gw_route_miss++; }
+
+		s_rxq_tail = (uint8_t)((s_rxq_tail + 1u) % GW_RXQ_LEN);
+		n++;
+	}
+}
+
 /* ★ 收到一帧
  * · 中断里只做取值和计数，不做任何打印和刷屏
  * · 数据直接写进 g_can_last_rx.data，主循环读来显示
@@ -569,6 +925,23 @@ const CanGwAlarm_t *CanGw_GetAlarm(void)
 void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
 {
     CAN_RxHeaderTypeDef header = {0};
+
+    /* 2026-11-24 加：CAN2 收到帧只做两件事——计数、入路由队列
+     * 为什么不做 F103 那套解码：CAN2 是转发目标，不是采集来源；
+     *   两边的字节布局并不相同，硬套会解出错值
+     * 怎么验证：Q 里的 c2rx 随转发增长 */
+    if (hcan->Instance == CAN2)
+    {
+	uint8_t buf2[8] = {0};
+
+	if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &header, buf2) != HAL_OK)
+	{
+		return;
+	}
+	g_can2_rx_frames++;
+	/* 只计数不入路由队列：路由表暂时只有 CAN1 到 CAN2 一个方向 */
+	return;
+    }
 
     if (hcan->Instance != CAN1)
     {
@@ -584,6 +957,9 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
     g_can_last_rx.dlc     = (uint8_t)header.DLC;
     g_can_last_rx.tick_ms = HAL_GetTick();
     g_can_rx_frames++;
+
+    /* 2026-11-24 加：入路由队列，由主循环决定要不要转出去 */
+    Gw_RxPush(0u, (uint16_t)g_can_last_rx.id, g_can_last_rx.data, g_can_last_rx.dlc);
 
     /* ★ 抓帧：只要 ID 对上就抄一份，放在解码分支之前
      *   · 放在前面是因为要抓的是"任意 ID"，不限于 0x101/0x102 那两个分支
@@ -753,6 +1129,32 @@ const CanGwData_t *CanGw_GetData(void)
  * · 没有用错误中断来判断，因为总线安静时不会有错误，但也没数据 */
 void CanGw_Poll(void)
 {
+    /* 2026-11-24 加：双通道路由。放在维护链路标志之前，
+     * 因为标志依赖解码结果，而路由只依赖帧本身 */
+    /* 2026-11-24 加：先把上一轮没发出去的帧补发掉，再收新的 */
+    CanGw_TxFlush();
+
+    /* 2026-11-24 加：CAN2 用轮询收帧，不挂中断
+     * 为什么：回环自检必须自己轮询拿帧，一旦挂了中断就会被回调抢走；
+     *   而且 CAN2 现在没有业务负载，2 ms 一轮足够（一帧 250 us，FIFO 3 级）
+     * 怎么验证：Q 里 c2rx 和 c2tx 应该同步增长
+     */
+    {
+	CAN_RxHeaderTypeDef rx2 = {0};
+	uint8_t buf3[8];
+
+	while (HAL_CAN_GetRxFifoFillLevel(&hcan2, CAN_RX_FIFO0) > 0u)
+	{
+		if (HAL_CAN_GetRxMessage(&hcan2, CAN_RX_FIFO0, &rx2, buf3) != HAL_OK)
+		{
+			break;
+		}
+		g_can2_rx_frames++;
+	}
+    }
+
+    CanGw_RouteDrain();
+
     if (s_data.frames == 0u)
     {
         s_data.valid = 0u;
@@ -803,6 +1205,22 @@ void CAN1_TX_IRQHandler(void)
 void CAN1_RX0_IRQHandler(void)
 {
     HAL_CAN_IRQHandler(&hcan1);
+}
+
+
+void CAN2_TX_IRQHandler(void)
+{
+	HAL_CAN_IRQHandler(&hcan2);
+}
+
+void CAN2_RX0_IRQHandler(void)
+{
+	HAL_CAN_IRQHandler(&hcan2);
+}
+
+void CAN2_SCE_IRQHandler(void)
+{
+	HAL_CAN_IRQHandler(&hcan2);
 }
 
 void CAN1_SCE_IRQHandler(void)

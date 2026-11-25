@@ -890,6 +890,26 @@ int main(void)
     }
 #endif
 
+    /* 2026-11-24 加：第二路 CAN（PB12/PB13）的回环自检
+     * 做了什么：把 CAN2 配成内部回环，发一帧再收回，结果存进 g_can2_self_test
+     * 为什么先用回环：收发器还没到、总线还断着，回环不依赖任何外部硬件，
+     *   能把"CAN2 外设/引脚有问题"和"硬件没到"这两件事分开
+     * 怎么验证：TCP 敲 Q，末尾 c2=0 表示通过，非 0 是出错步骤号
+     * 真机到货后改成 CanGw_Init2(0u)，走正常总线模式
+     */
+#if (CAN_ENABLE != 0)
+    if (CanGw_Init2(1u) == HAL_OK)
+    {
+        g_can2_self_test = CanGw_SelfTest2();
+        printf("[CAN2] loopback selftest = %u (0=pass)\r\n", (unsigned)g_can2_self_test);
+    }
+    else
+    {
+        g_can2_self_test = 0xFEu;
+        printf("[CAN2] init FAIL\r\n");
+    }
+#endif
+
     /* 锟斤拷 2026-11-22锟斤拷W5500 锟斤拷太锟斤拷锟斤拷始锟斤拷
      * 锟斤拷 顺锟斤拷锟斤拷锟斤拷+锟斤拷位 锟斤拷 锟斤拷锟芥本锟斤拷锟斤拷证 锟斤拷 写锟斤拷锟斤拷锟斤拷锟?锟斤拷 锟斤拷 socket 锟斤拷锟斤拷
      * 锟斤拷 锟芥本锟脚讹拷锟斤拷 0x04锟斤拷step=5锟斤拷锟斤拷说锟斤拷 SPI 通路锟斤拷锟斤拷

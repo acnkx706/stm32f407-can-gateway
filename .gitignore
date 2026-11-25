@@ -39,3 +39,9 @@ __pycache__/
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# ---- 坏掉的备份文件（调试期留下的） ----
+*.broken-*
+*.broken
+_tmp*
+_tmp_*

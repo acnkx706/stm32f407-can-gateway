@@ -104,13 +104,33 @@ extern volatile uint8_t  g_can_cap_data[8];
 extern volatile uint32_t g_can_cap_cnt;     /* 抓到过几帧，CAP 布置时清零 */
 
 extern CAN_HandleTypeDef hcan1;
-extern volatile uint8_t  g_can_init_step;   /* 初始化挂在第几步，定位用 */
+extern CAN_HandleTypeDef hcan2;   /* 2026-11-24 加：第二路总线 */
+extern volatile uint8_t  g_can_init_step;
+extern volatile uint8_t  g_can2_self_test;   /* 2026-11-24 加：CAN2 回环自检结果 */
+
+/* ★ 双通道与路由计数（2026-11-24 加），都从 TCP 的 Q 观察 */
+extern volatile uint32_t g_can2_rx_frames;   /* CAN2 收到的帧数 */
+extern volatile uint32_t g_can2_tx_frames;   /* CAN2 发出去的帧数 */
+extern volatile uint32_t g_gw_route_hit;     /* 命中路由表并转发的帧数 */
+extern volatile uint32_t g_gw_route_miss;    /* 没命中路由表（只计数不转发） */
+extern volatile uint32_t g_gw_txq_drop;      /* 后备队列也满、真丢掉的帧数（应恒为 0） */
+
+/* ★ 在指定通道上发一帧：ch = 0 走 CAN1，ch = 1 走 CAN2 */
+HAL_StatusTypeDef CanGw_SendStdCh(uint8_t ch, uint16_t std_id, const uint8_t *data, uint8_t len);   /* 初始化挂在第几步，定位用 */
 
 /* ★ 初始化
  * · loopback 为 1 是内部回环，不接总线也能收到自己发的帧
  * · 为 0 是正常总线模式，必须有第二个节点应答才算发送成功
  */
 HAL_StatusTypeDef CanGw_Init(uint8_t loopback);
+
+/* ★ CAN2（第二路总线）初始化，2026-11-24 加
+ * · loopback = 1 走内部回环，不接收发器也能自检
+ * · 滤波器组从 14 起，和 CAN1 的 0 组不冲突 */
+HAL_StatusTypeDef CanGw_Init2(uint8_t loopback);
+
+/* ★ CAN2 回环自检：返回 0 = 通过，非 0 = 出错步骤号 */
+uint8_t CanGw_SelfTest2(void);
 
 /* ★ 发一帧标准数据帧
  * · 返回 HAL_OK 只表示成功装进邮箱，不代表总线上已经发完

@@ -30,8 +30,14 @@ from isotp_test import crc16_kermit
 from routine_test import request_final
 from sec_test import Uds, fmt, calc_key
 
-APP_BIN = (r"C:\Users\acnkx\Desktop\stm32\项目1：工业记录仪\工业记录仪"
-           r"\Objects\app.bin")
+# ★ 原来这里写死了作者机器上的绝对路径（会泄露用户名，换机器就废）
+#   现在改成环境变量优先；没设就按仓库相对位置找配套的 F103 工程
+#   = 三个 .. 从 tools/ 退到 stm32/ ，再进 项目1：工业记录仪
+HERE = os.path.dirname(os.path.abspath(__file__))
+APP_BIN = os.environ.get(
+    "CAN_GW_APP_BIN",
+    os.path.join(HERE, "..", "..", "..", "项目1：工业记录仪",
+                 "工业记录仪", "Objects", "app.bin"))
 CHUNK = 256          # 和 maxNumberOfBlockLength - 2 一致
 
 
